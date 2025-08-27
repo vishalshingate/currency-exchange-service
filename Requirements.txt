@@ -1,0 +1,6 @@
+ // Requirement
+    Currency-exchange-service
+    1 .// http:localhost/8012/currency-exchange/from/USD/to/INR
+
+    2. Currency-conversion-service
+     http:localhost/8012/currency-conversion/from/USD/to/INR/quantity/10
