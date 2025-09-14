@@ -1,6 +1,9 @@
 package com.example.currencyexchangeservice.controller;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.env.Environment;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.http.HttpStatus;
@@ -13,9 +16,13 @@ import java.math.BigDecimal;
 
 @RestController
 public class CurrencyExchangeController {
+    @Value("${server.port}")
+    private String port;
     @Autowired
     private Environment environment;
     private CurrencyExchangeService currencyExchangeService;
+
+    private Logger logger = LoggerFactory.getLogger(CurrencyExchangeController.class);
 
     public CurrencyExchangeController(CurrencyExchangeService currencyExchangeService) {
         this.currencyExchangeService = currencyExchangeService;
@@ -26,6 +33,7 @@ public class CurrencyExchangeController {
     //CurrencyExchange currencyExchange = CurrencyExchange.builder().id(1000L).from(from).to(to).conversionMultiple(BigDecimal.valueOf(50)).build();
 //    String port = environment.getProperty("local.server.port");
 //    currencyExchange.setEnvironment(port);
+    logger.info("retrieveExchangeValue called with {} to {} with port : {}", from, to, port);
     CurrencyExchange currencyExchange = currencyExchangeService.retrieveExchangeValue(from, to);
     if(currencyExchange != null) {
         currencyExchange.setEnvironment(environment.getProperty("local.server.port"));
