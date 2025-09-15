@@ -31,7 +31,6 @@ ext {
 dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
     implementation 'org.springframework.boot:spring-boot-starter-web'
-    implementation 'org.springframework.cloud:spring-cloud-starter-config'
     implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
     implementation 'org.springframework.cloud:spring-cloud-starter-netflix-eureka-client'
     implementation 'io.zipkin.reporter2:zipkin-reporter-brave'
@@ -53,3 +52,15 @@ dependencyManagement {
 tasks.named('test') {
     useJUnitPlatform()
 }
+
+def registry = findProperty("registry") ?: "vishalshingate"
+
+bootBuildImage {
+    imageName = "${registry}/${project.name}:${version}"
+    environment = ["BP_JVM_VERSION": "17"]
+    if (project.hasProperty('publishImage')) {
+        publish = true
+    }
+}
+
+tasks.named('build') { finalizedBy 'bootBuildImage' }
