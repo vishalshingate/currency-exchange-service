@@ -8,12 +8,6 @@ group = 'com.example'
 version = '0.0.1-SNAPSHOT'
 description = 'currency-exchange-service'
 
-java {
-    toolchain {
-        languageVersion = JavaLanguageVersion.of(17)
-    }
-}
-
 configurations {
     compileOnly {
         extendsFrom annotationProcessor
@@ -32,11 +26,12 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
     implementation 'org.springframework.boot:spring-boot-starter-web'
     implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    implementation 'org.springframework.boot:spring-boot-starter-cache'
     implementation 'org.springframework.cloud:spring-cloud-starter-netflix-eureka-client'
     implementation 'io.zipkin.reporter2:zipkin-reporter-brave'
     implementation 'io.micrometer:micrometer-tracing-bridge-brave'
+    implementation 'org.springframework.boot:spring-boot-starter-data-redis'
     compileOnly 'org.projectlombok:lombok'
-    developmentOnly 'org.springframework.boot:spring-boot-devtools'
     annotationProcessor 'org.projectlombok:lombok'
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     runtimeOnly 'com.h2database:h2'
@@ -62,5 +57,3 @@ bootBuildImage {
         publish = true
     }
 }
-
-tasks.named('build') { finalizedBy 'bootBuildImage' }
