@@ -45,61 +45,85 @@ The database and cache end up with B's values, silently discarding A's update.
    - Deletes use `@CacheEvict` to remove entries for deleted exchanges.
    - The Redis cache manager is configured with a **locking writer** (`RedisCacheWriter.lockingRedisCacheWriter`) to avoid concurrent write races on the same cache key.
 
-### Normal PUT Flow (Single Client)
+## Redis Fallback and Resilience
 
-1. Client sends `PUT /currency-exchange/{id}` with a JSON body representing `CurrencyExchange` (including the current `version` when exposed).
-2. `CurrencyExchangeController.updateExchange` delegates to `CurrencyExchangeService.updateExchange`.
-3. Service:
-   - Loads the existing `CurrencyExchange` from the database by `id`.
-   - Applies incoming changes.
-   - Saves the entity.
-   - JPA checks the `version` and increments it if the update succeeds.
-4. Cache:
-   - `@CachePut` updates the `exchangeValue` cache for key `from_to` with the new entity.
-5. Controller returns `200 OK` with the updated `CurrencyExchange`.
+### Requirement
 
-### Concurrent PUT Race (Two Clients)
+The service must continue to work even if Redis is down at startup or becomes unavailable while handling requests. Clients should still be able to read and update currency exchanges using the database, and no HTTP failures should be caused purely by cache issues. Once Redis is back, caching should resume automatically.
 
-**Scenario:** Clients A and B both try to update the same `CurrencyExchange`.
+### Approach
 
-1. **Both clients read the same state**
-   - A and B both GET `/currency-exchange/from/{from}/to/{to}` and see the same `version` and values.
+1. **Database as the source of truth**
+   - All business logic relies on the relational database via JPA.
+   - Redis is treated as a best-effort performance optimization only.
 
-2. **Client A updates first**
-   - A sends PUT with the current `version` and new data.
-   - Service saves successfully; JPA increments the `version`.
-   - `@CachePut` updates Redis with the new entity.
+2. **Resilient CacheManager and Cache decorator**
+   - The `CacheConfig` defines a `RedisCacheManager` backed by `RedisCacheWriter.lockingRedisCacheWriter`.
+   - This manager is wrapped in a `ResilientCacheManager` and `ResilientCache`:
+     - On **cache read failures** (e.g., Redis down, timeout), the wrapper returns `null` so Spring treats it as a cache miss and calls the underlying repository (DB) logic.
+     - On **cache write/evict failures**, the wrapper swallows the exception after logging; the database transaction result is still returned to the client.
+   - If cache discovery itself fails (for example, Redis is fully unavailable during startup), `getCacheNames()` returns an empty list so the app still starts and operates purely against the DB.
 
-3. **Client B updates using stale data**
-   - B sends PUT with the now-stale `version`.
-   - When saving, JPA detects that the database row has a different `version` than expected and throws an optimistic locking exception.
-   - `GlobalExceptionHandler` converts this to HTTP `409 CONFLICT`.
-   - The cache remains at A's successfully updated value.
+3. **Interaction with method-level caching**
+   - Service methods keep using Spring cache annotations:
+     - `@Cacheable` for reads.
+     - `@CachePut` for creates/updates.
+     - `@CacheEvict` for deletes.
+   - Because these annotations use the resilient cache wrapper, any Redis problem is contained at the cache layer and does not change service or controller behavior.
 
-### Sequence Diagrams (Mermaid)
+4. **Recovery behavior**
+   - When Redis becomes healthy again, cache operations start succeeding without any code or configuration changes. No application restart is required.
+   - **How it works internally:**
+     1. The application uses the **Lettuce** Redis client (default in Spring Boot).
+     2. Lettuce has built-in **transparent reconnection**. It constantly monitors the connection status.
+     3. If Redis goes offline, Lettuce attempts to reconnect in the background.
+     4. During downtime, the `ResilientCache` wrapper catches the connection exceptions and falls back to the DB.
+     5. Once Lettuce successfully reconnects, the exceptions stop, and the `ResilientCache` automatically resumes updating and reading from Redis.
 
-#### Normal Successful PUT
+### Flow Diagrams (Mermaid)
+
+#### Normal Flow with Cache Hit
 
 ```mermaid
 sequenceDiagram
     participant C as Client
-    participant Ctrl as CurrencyExchangeController
-    participant S as CurrencyExchangeService
+    participant Ctrl as Controller
+    participant S as Service
+    participant Cache as Resilient Redis Cache
     participant DB as Database
-    participant Cache as Redis Cache
 
-    C->>Ctrl: PUT /currency-exchange/{id}
-    Ctrl->>S: updateExchange(id, body)
-    S->>DB: findById(id)
-    DB-->>S: CurrencyExchange (current version)
-    S->>DB: save(updated entity)
-    DB-->>S: CurrencyExchange (new version)
-    S->>Cache: @CachePut update key from_to
-    S-->>Ctrl: updated CurrencyExchange
-    Ctrl-->>C: 200 OK + updated body
+    C->>Ctrl: GET /currency-exchange/from/{from}/to/{to}
+    Ctrl->>S: retrieveExchangeValue(from, to)
+    S->>Cache: @Cacheable get(from_to)
+    Cache-->>S: entity (cache hit)
+    S-->>Ctrl: entity
+    Ctrl-->>C: 200 OK + JSON body
 ```
 
-#### Concurrent PUT with Conflict
+#### Redis Down: Fallback to Database
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant Ctrl as Controller
+    participant S as Service
+    participant Cache as Resilient Redis Cache
+    participant DB as Database
+
+    C->>Ctrl: GET /currency-exchange/from/{from}/to/{to}
+    Ctrl->>S: retrieveExchangeValue(from, to)
+    S->>Cache: @Cacheable get(from_to)
+    Cache-->>S: (throws RuntimeException internally)
+    note over Cache: ResilientCache catches and returns null
+    S->>DB: findByFromAndTo(from, to)
+    DB-->>S: entity from DB
+    S->>Cache: @CachePut put(from_to, entity)
+    Cache-->>S: (may fail, failure swallowed)
+    S-->>Ctrl: entity
+    Ctrl-->>C: 200 OK + JSON body
+```
+
+#### Concurrent PUT with Redis Issues
 
 ```mermaid
 sequenceDiagram
@@ -107,40 +131,28 @@ sequenceDiagram
     participant B as Client B
     participant Ctrl as Controller
     participant S as Service
+    participant Cache as Resilient Redis Cache
     participant DB as Database
-    participant Cache as Redis
-
-    A->>Ctrl: GET /currency-exchange
-    Ctrl->>S: retrieveExchangeValue
-    S->>DB: findByFromAndTo
-    DB-->>S: entity (version v1)
-    S->>Cache: @Cacheable (cache miss -> populate)
-    S-->>Ctrl: entity v1
-    Ctrl-->>A: 200 OK (version v1)
-
-    B->>Ctrl: GET /currency-exchange
-    Ctrl->>S: retrieveExchangeValue
-    S->>Cache: cache hit (entity v1)
-    S-->>Ctrl: entity v1
-    Ctrl-->>B: 200 OK (version v1)
 
     A->>Ctrl: PUT /currency-exchange (version v1)
     Ctrl->>S: updateExchange(id, v1)
-    S->>DB: save (expected version v1)
+    S->>DB: save expected version v1
     DB-->>S: success (version v2)
-    S->>Cache: @CachePut update key from_to with v2
+    S->>Cache: @CachePut put(from_to, v2)
+    Cache-->>S: (may succeed or fail, failure swallowed)
     S-->>Ctrl: entity v2
     Ctrl-->>A: 200 OK (version v2)
 
     B->>Ctrl: PUT /currency-exchange (version v1)
     Ctrl->>S: updateExchange(id, v1)
-    S->>DB: save (expected version v1)
-    DB-->>S: OptimisticLockException
+    S->>DB: save expected version v1
+    DB-->>S: OptimisticLockException (stale version)
     S-->>Ctrl: exception
-    Ctrl-->>B: 409 CONFLICT (instruct to reload and retry)
+    Ctrl-->>B: 409 CONFLICT
+    note over Ctrl,DB: Redis errors do not affect the optimistic locking behavior or HTTP status
 ```
 
-### How to Run Tests
+## How to Run Tests
 
 Run the full test suite (including concurrency tests):
 
@@ -156,3 +168,4 @@ On Windows PowerShell:
 
 The `ConcurrencyUpdateTests` class verifies that a second save of a stale `CurrencyExchange` instance results in an `OptimisticLockingFailureException`, demonstrating that concurrent updates cannot silently overwrite each other.
 
+Additional tests can be added to specifically simulate Redis failures while ensuring that service methods still return successful responses using the database as the fallback.
